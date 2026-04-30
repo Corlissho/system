@@ -1,0 +1,71 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "email": { "type": "string" },
+        "contactQR": { "type": "string", "description": "URL to contact QR code image" },
+        "favorites": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["uid", "displayName", "email"]
+    },
+    "Post": {
+      "title": "Post",
+      "description": "A marketplace post (selling or buying)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "authorPhoto": { "type": "string" },
+        "type": { "type": "string", "enum": ["sell", "buy"] },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "price": { "type": "number" },
+        "images": { "type": "array", "items": { "type": "string" } },
+        "category": { "type": "string", "enum": ["教科書", "電子產品", "生活用品", "運動器材", "其他"] },
+        "status": { "type": "string", "enum": ["active", "reserved", "completed"] },
+        "contactInfo": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["authorId", "type", "title", "category", "status", "createdAt"]
+    },
+    "Comment": {
+      "title": "Comment",
+      "description": "A comment or reply on a post",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "postId": { "type": "string" },
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "authorPhoto": { "type": "string" },
+        "content": { "type": "string" },
+        "parentId": { "type": "string", "description": "ID of the parent comment if this is a reply" },
+        "replyToName": { "type": "string", "description": "Name of the user being replied to" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["postId", "authorId", "content", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/posts/{postId}": {
+      "schema": "Post",
+      "description": "Marketplace posts"
+    },
+    "/posts/{postId}/comments/{commentId}": {
+      "schema": "Comment",
+      "description": "Comments on posts"
+    }
+  }
+}

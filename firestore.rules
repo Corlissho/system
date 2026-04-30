@@ -1,0 +1,77 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Fields: uid, displayName, photoURL, email, contactQR, favorites
+    //
+    // Collection: posts
+    // Fields: authorId, authorName, authorPhoto, type, title, description, price, images, category, status, contactInfo, createdAt, updatedAt
+    //
+    // Collection: posts/{postId}/comments
+    // Fields: postId, authorId, authorName, authorPhoto, content, createdAt
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.authorId;
+    }
+
+    function isValidPost(data) {
+      return data.title is string && data.title.size() > 0 && data.title.size() < 100 &&
+             data.type in ['sell', 'buy'] &&
+             data.category in ['教科書', '電子產品', '生活用品', '運動器材', 'Stretch', '其他'] &&
+             data.status in ['active', 'reserved', 'completed'] &&
+             data.authorId == request.auth.uid;
+    }
+
+    function isValidComment(data) {
+      return data.content is string && data.content.size() > 0 && data.content.size() <= 1000 &&
+             data.authorId == request.auth.uid &&
+             (data.authorName == null || data.authorName is string) &&
+             (data.authorPhoto == null || data.authorPhoto is string) &&
+             (data.postId == null || data.postId is string) &&
+             (!('parentId' in data) || (data.parentId is string && data.parentId.size() <= 128)) &&
+             (!('replyToName' in data) || (data.replyToName is string && data.replyToName.size() <= 100)) &&
+             data.createdAt == request.time;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         (request.auth.token.email == "1260048-2@g.puiching.edu.mo" && request.auth.token.email_verified == true));
+    }
+
+    // Rules
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isOwner(userId);
+    }
+
+    match /posts/{postId} {
+      allow read: if true; // Publicly readable for browsing
+      allow create: if isAuthenticated() && isValidPost(request.resource.data);
+      allow update: if (isDocOwner() && isValidPost(request.resource.data)) || isAdmin();
+      allow delete: if isDocOwner() || isAdmin();
+
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if isAuthenticated() && isValidComment(request.resource.data);
+        allow update: if false; // Comments are typically immutable in this app
+        allow delete: if (isAuthenticated() && request.auth.uid == resource.data.authorId) || isAdmin();
+      }
+    }
+  }
+}
