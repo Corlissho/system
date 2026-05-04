@@ -178,6 +178,30 @@
 
     <!-- Scripts -->
     <script>
+        // ========== GOOGLE SHEET 同步設定 ==========
+        // 請將下方 URL 換成您部署 Google Apps Script 後取得的「網頁應用程式網址」
+        const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxkkPEcOb5OU1ncfyPLk3SZ_FHHh62xfq3MYEBBYLo1QXgN5k5Xj3Y4ZnAvaOoEHneIXQ/exec";
+        
+        // 非同步同步函式（不影響主流程）
+        async function syncToSheet(payload) {
+            if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL === "PASTE_YOUR_APPS_SCRIPT_URL_HERE") {
+                console.warn("尚未設定 APPS_SCRIPT_URL，跳過同步至 Google Sheet");
+                return;
+            }
+            try {
+                const response = await fetch(APPS_SCRIPT_URL, {
+                    method: "POST",
+                    mode: "no-cors",  // 避免 CORS 問題
+                    headers: { "Content-Type": "text/plain" },
+                    body: JSON.stringify(payload)
+                });
+                // 因為 no-cors 無法讀取回應，故不處理結果，只確保送出
+                console.log("同步要求已送出", payload.action, payload.id || "");
+            } catch (err) {
+                console.warn("同步至 Google Sheet 失敗", err);
+            }
+        }
+        
         // --- CONSTANTS ---
         const LOCAL_STORAGE_KEY = "records";
         const USER_STORAGE_KEY = "campus_trade_user";
@@ -261,11 +285,14 @@
             return data ? JSON.parse(data) : [];
         }
 
+        // 修改後的 saveData：先存 localStorage，再非同步同步至 Google Sheet
         function saveData(newRecord) {
             const records = loadData();
             records.unshift(newRecord);
             localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
             renderList();
+            // 同步至 Google Sheet
+            syncToSheet({ action: "create", record: newRecord });
         }
 
         function renderList() {
@@ -476,7 +503,7 @@
                 imageBase64 = await fileToBase64(imageFile);
             }
             
-            // RULE 4: Data Schema
+            // Data Schema
             const newRecord = {
                 id: Date.now() + "_" + Math.random().toString(36).slice(2,6),
                 createdAt: new Date().toISOString(),
@@ -490,19 +517,22 @@
                 type: document.querySelector('input[name="type"]:checked').value,
                 image: imageBase64,
                 contactInfo: document.getElementById('contactInfo').value,
-                status: "active" // Required rule 4 default
+                status: "active"
             };
 
             saveData(newRecord);
             closeModal();
         };
 
+        // 修改後的 deleteRecord：先刪除 localStorage，再同步刪除至 Google Sheet
         function deleteRecord(id) {
             if (!confirm("確定要刪除嗎？")) return;
             let records = loadData();
             records = records.filter(r => r.id !== id);
             localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
             renderList();
+            // 同步刪除至 Google Sheet
+            syncToSheet({ action: "delete", id: id });
         }
 
         function showDetails(id) {
@@ -587,6 +617,7 @@
             document.getElementById('detailsModal').classList.add('hidden');
         }
 
+        // 修改後的 updateStatus：更新 localStorage 後，同步完整 record 至 Google Sheet
         function updateStatus(id, newStatus) {
             let records = loadData();
             const idx = records.findIndex(r => r.id === id);
@@ -595,6 +626,8 @@
                 localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
                 renderList();
                 showDetails(id); // Refresh modal
+                // 同步更新後的完整 record 到 Google Sheet
+                syncToSheet({ action: "update", id: id, record: records[idx] });
             }
         }
 
@@ -606,6 +639,7 @@
             input.focus();
         }
 
+        // 修改後的 addComment：更新 localStorage 後，同步完整 record 至 Google Sheet
         function addComment(id) {
             if (!currentUser) return alert("請先登入帳號");
             const input = document.getElementById('commentInput');
@@ -625,6 +659,8 @@
                 input.value = '';
                 currentReplyTo = null;
                 showDetails(id);
+                // 同步更新後的完整 record 到 Google Sheet
+                syncToSheet({ action: "update", id: id, record: records[idx] });
             }
         }
 
