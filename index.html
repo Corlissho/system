@@ -184,8 +184,7 @@
     <script>
         // ========== GOOGLE SHEET 同步設定 ==========
         // 請將下方 URL 換成您部署 Google Apps Script 後取得的「網頁應用程式網址」
-        const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxkkPEcOb5OU1ncfyPLk3SZ_FHHh62xfq3MYEBBYLo1QXgN5k5Xj3Y4ZnAvaOoEHneIXQ/exec";
-        
+        const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxkkPEcOb5OU1ncfyPLk3SZ_FHHh62xfq3MYEBBYLo1QXgN5k5Xj3Y4ZnAvaOoEHneIXQ/exec"
         // 非同步同步函式（不影響主流程）
         async function syncToSheet(payload) {
             if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL === "PASTE_YOUR_APPS_SCRIPT_URL_HERE") {
