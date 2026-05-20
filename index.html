@@ -46,6 +46,10 @@
                 <div id="userAccountSection" class="flex items-center gap-2">
                     <!-- Dynamic User Info -->
                 </div>
+                <button onclick="handleAISummary()" id="aiBtn" class="bg-zinc-800 text-zinc-100 px-4 py-2 rounded-full text-sm font-bold shadow-md hover:bg-zinc-700 transition-all flex items-center gap-2 active:scale-95 disabled:opacity-50">
+                    <i data-lucide="sparkles" class="w-4 h-4"></i>
+                    <span id="aiBtnText">AI 盤點</span>
+                </button>
                 <button onclick="openModal()" class="bg-primary text-white px-5 py-2 rounded-full text-sm font-bold shadow-md hover:bg-primary/90 transition-all flex items-center gap-2">
                     <i data-lucide="plus" class="w-4 h-4"></i>
                     發佈
@@ -220,83 +224,75 @@
         };
         let currentUser = null;
 
-        // --- CORE FUNCTIONS ---
-        
-        function loadUser() {
-            const data = localStorage.getItem(USER_STORAGE_KEY);
-            currentUser = data ? JSON.parse(data) : null;
-            updateUserUI();
-        }
-
-        function handleLogin() {
-            const username = document.getElementById('loginUsername').value.trim();
-            if (!username) return alert("請輸入稱呼");
-            
-            currentUser = {
-                id: "user_" + Date.now(),
-                name: username
-            };
-            localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(currentUser));
-            document.getElementById('loginModal').classList.add('hidden');
-            updateUserUI();
-            renderList();
-        }
-
-        function handleLogout() {
-            localStorage.removeItem(USER_STORAGE_KEY);
-            currentUser = null;
-            updateUserUI();
-            renderList();
-            hideDetails(); // Close details if open to refresh state
-        }
-
-        function updateUserUI() {
-            const container = document.getElementById('userAccountSection');
-            if (currentUser) {
-                container.innerHTML = `
-                    <div class="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-full border border-slate-100">
-                        <div class="w-6 h-6 bg-primary text-white rounded-full flex items-center justify-center text-[10px] font-bold">
-                            ${currentUser.name.charAt(0)}
-                        </div>
-                        <span class="text-xs font-bold text-slate-600">${currentUser.name}</span>
-                        <button onclick="handleLogout()" class="flex items-center gap-1 text-slate-300 hover:text-red-500 transition-colors ml-1 p-1" title="登出">
-                            <i data-lucide="log-out" class="w-4 h-4"></i>
-                            <span class="text-[10px] font-bold">登出</span>
-                        </button>
-                    </div>
-                `;
-            } else {
-                container.innerHTML = `
-                    <button onclick="showLoginModal()" class="text-xs font-bold text-slate-400 hover:text-primary transition-colors flex items-center gap-1">
-                        <i data-lucide="user-plus" class="w-4 h-4"></i>
-                        登入
-                    </button>
-                `;
+        // --- 資料標準化：同時支援 Sheet 大楷欄位與前端小寫欄位 ---
+        function normalizeRecord(record) {
+            let parsedComments = [];
+            try {
+                if (record.comment || record.Comment) {
+                    const rawComment = record.comment || record.Comment;
+                    parsedComments = typeof rawComment === 'string' ? JSON.parse(rawComment) : rawComment;
+                }
+            } catch (e) {
+                console.warn("解析留言欄位失敗，改為空陣列", e);
             }
-            lucide.createIcons();
+
+            return {
+                id: record.id || record.ID || "",
+                createdAt: record.createdAt || record.CreatedAt || "",
+                ownerId: record.ownerId || record.ownerId || "",
+                ownerName: record.ownerName || record.ownerName || "",
+                title: record.title || record.Title || "",
+                price: Number(record.price !== undefined ? record.price : (record.Price || 0)),
+                description: record.description || record.Description || "",
+                category: record.category || record.Category || "其他",
+                type: record.type || record.Type || "sell",
+                image: record.image || record.Image || "",
+                contactInfo: record.contactInfo || record.ContactInfo || "",
+                status: record.status || record.Status || "active",
+                comment: Array.isArray(parsedComments) ? parsedComments : []
+            };
         }
 
-        function showLoginModal() {
-            document.getElementById('loginModal').classList.remove('hidden');
+        // --- 從 Sheet 讀取資料（遠端優先，localStorage 做 fallback）---
+        async function fetchRecordsFromSheet() {
+            if (APPS_SCRIPT_URL.includes("PASTE") || !APPS_SCRIPT_URL) return null;
+            try {
+                const res = await fetch(APPS_SCRIPT_URL);
+                const data = await res.json();
+                return Array.isArray(data.records) ? data.records.map(normalizeRecord) : null;
+            } catch (e) {
+                console.warn("從 Sheet 讀取失敗", e);
+                return null;
+            }
         }
-        
-        function loadData() {
+
+        // --- 載入資料（先試遠端，失敗則用本機快取）---
+        async function loadData() {
+            const remote = await fetchRecordsFromSheet();
+            if (remote) {
+                localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(remote));
+                return remote;
+            }
             const data = localStorage.getItem(LOCAL_STORAGE_KEY);
             return data ? JSON.parse(data) : [];
         }
 
-        // 修改後的 saveData：先存 localStorage，再非同步同步至 Google Sheet
-        function saveData(newRecord) {
-            const records = loadData();
-            records.unshift(newRecord);
+        // --- 儲存新紀錄（即時渲染，後台同步）---
+        async function saveData(newRecord) {
+            const records = await loadData();
+            const normalized = normalizeRecord(newRecord);
+            records.unshift(normalized);
             localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
-            renderList();
-            // 同步至 Google Sheet
-            syncToSheet({ action: "create", record: newRecord });
+            await renderList(records);
+            
+            // 同步至 Google Sheet 時，將 comment 轉成字串上傳避免後端解析出錯
+            const uploadRecord = { ...normalized, comment: JSON.stringify(normalized.comment) };
+            syncToSheet({ action: "create", record: uploadRecord });
         }
 
-        function renderList() {
-            const records = loadData();
+        // --- 渲染列表（可傳入 recordsOverride 避免重新拉取舊資料）---
+        async function renderList(recordsOverride) {
+            const records = recordsOverride || await loadData();
             const container = document.getElementById('postList');
             container.innerHTML = '';
 
@@ -402,7 +398,8 @@
         }
 
         function updateFiltersUI() {
-            const records = loadData();
+            // 使用 records 讀取快取即可，因為我們只在 renderList 後調用
+            const records = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || '[]');
             
             // Category Filter
             const catContainer = document.getElementById('categoryFilterContainer');
@@ -411,7 +408,7 @@
             ['全部', ...CATEGORIES].forEach(cat => {
                 const count = cat === '全部' ? records.length : records.filter(r => r.category === cat).length;
                 const btn = document.createElement('button');
-                btn.onclick = () => { currentFilter.category = cat; renderList(); };
+                btn.onclick = async () => { currentFilter.category = cat; await renderList(); };
                 btn.className = `px-4 py-1.5 rounded-full text-[13px] transition-all flex items-center gap-2 shrink-0 ${currentFilter.category === cat ? 'bg-primary text-white shadow-lg shadow-primary/20' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`;
                 btn.innerHTML = `
                     <span>${cat}</span>
@@ -427,7 +424,7 @@
             STATUSES.forEach(status => {
                 const count = status.id === 'all' ? records.length : records.filter(r => r.status === status.id).length;
                 const btn = document.createElement('button');
-                btn.onclick = () => { currentFilter.status = status.id; renderList(); };
+                btn.onclick = async () => { currentFilter.status = status.id; await renderList(); };
                 btn.className = `px-4 py-1.5 rounded-full text-[13px] transition-all flex items-center gap-2 shrink-0 ${currentFilter.status === status.id ? 'bg-accent text-white shadow-lg shadow-accent/20' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`;
                 btn.innerHTML = `
                     <span>${status.name}</span>
@@ -503,7 +500,7 @@
                 imageBase64 = await fileToBase64(imageFile);
             }
             
-            // Data Schema
+            // Data Schema (使用 normalizeRecord 相容的欄位名稱)
             const newRecord = {
                 id: Date.now() + "_" + Math.random().toString(36).slice(2,6),
                 createdAt: new Date().toISOString(),
@@ -520,23 +517,23 @@
                 status: "active"
             };
 
-            saveData(newRecord);
+            await saveData(newRecord);
             closeModal();
         };
 
         // 修改後的 deleteRecord：先刪除 localStorage，再同步刪除至 Google Sheet
-        function deleteRecord(id) {
+        async function deleteRecord(id) {
             if (!confirm("確定要刪除嗎？")) return;
-            let records = loadData();
+            let records = await loadData();
             records = records.filter(r => r.id !== id);
             localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
-            renderList();
+            await renderList(records);
             // 同步刪除至 Google Sheet
             syncToSheet({ action: "delete", id: id });
         }
 
-        function showDetails(id) {
-            const records = loadData();
+        async function showDetails(id) {
+            const records = await loadData();
             const record = records.find(r => r.id === id);
             if (!record) return;
 
@@ -618,16 +615,17 @@
         }
 
         // 修改後的 updateStatus：更新 localStorage 後，同步完整 record 至 Google Sheet
-        function updateStatus(id, newStatus) {
-            let records = loadData();
+        async function updateStatus(id, newStatus) {
+            let records = await loadData();
             const idx = records.findIndex(r => r.id === id);
             if (idx !== -1) {
                 records[idx].status = newStatus;
                 localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
-                renderList();
-                showDetails(id); // Refresh modal
-                // 同步更新後的完整 record 到 Google Sheet
-                syncToSheet({ action: "update", id: id, record: records[idx] });
+                await renderList(records);
+                await showDetails(id); // Refresh modal
+                // 同步更新後的完整 record 到 Google Sheet（comment 字串化）
+                const uploadRecord = { ...records[idx], comment: JSON.stringify(records[idx].comment) };
+                syncToSheet({ action: "update", id: id, record: uploadRecord });
             }
         }
 
@@ -640,13 +638,13 @@
         }
 
         // 修改後的 addComment：更新 localStorage 後，同步完整 record 至 Google Sheet
-        function addComment(id) {
+        async function addComment(id) {
             if (!currentUser) return alert("請先登入帳號");
             const input = document.getElementById('commentInput');
             const text = input.value.trim();
             if (!text) return;
 
-            let records = loadData();
+            let records = await loadData();
             const idx = records.findIndex(r => r.id === id);
             if (idx !== -1) {
                 records[idx].comment.push({
@@ -658,16 +656,117 @@
                 localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
                 input.value = '';
                 currentReplyTo = null;
-                showDetails(id);
-                // 同步更新後的完整 record 到 Google Sheet
-                syncToSheet({ action: "update", id: id, record: records[idx] });
+                await renderList(records);
+                await showDetails(id);
+                // 同步更新後的完整 record（comment 字串化）
+                const uploadRecord = { ...records[idx], comment: JSON.stringify(records[idx].comment) };
+                syncToSheet({ action: "update", id: id, record: uploadRecord });
+            }
+        }
+
+        // --- 使用者管理 ---
+        function loadUser() {
+            const data = localStorage.getItem(USER_STORAGE_KEY);
+            currentUser = data ? JSON.parse(data) : null;
+            updateUserUI();
+        }
+
+        async function handleLogin() {
+            const username = document.getElementById('loginUsername').value.trim();
+            if (!username) return alert("請輸入稱呼");
+            
+            currentUser = {
+                id: "user_" + Date.now(),
+                name: username
+            };
+            localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(currentUser));
+            document.getElementById('loginModal').classList.add('hidden');
+            updateUserUI();
+            await renderList();
+        }
+
+        async function handleLogout() {
+            localStorage.removeItem(USER_STORAGE_KEY);
+            currentUser = null;
+            updateUserUI();
+            await renderList();
+            hideDetails();
+        }
+
+        function updateUserUI() {
+            const container = document.getElementById('userAccountSection');
+            if (currentUser) {
+                container.innerHTML = `
+                    <div class="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-full border border-slate-100">
+                        <div class="w-6 h-6 bg-primary text-white rounded-full flex items-center justify-center text-[10px] font-bold">
+                            ${currentUser.name.charAt(0)}
+                        </div>
+                        <span class="text-xs font-bold text-slate-600">${currentUser.name}</span>
+                        <button onclick="handleLogout()" class="flex items-center gap-1 text-slate-300 hover:text-red-500 transition-colors ml-1 p-1" title="登出">
+                            <i data-lucide="log-out" class="w-4 h-4"></i>
+                            <span class="text-[10px] font-bold">登出</span>
+                        </button>
+                    </div>
+                `;
+            } else {
+                container.innerHTML = `
+                    <button onclick="showLoginModal()" class="text-xs font-bold text-slate-400 hover:text-primary transition-colors flex items-center gap-1">
+                        <i data-lucide="user-plus" class="w-4 h-4"></i>
+                        登入
+                    </button>
+                `;
+            }
+            lucide.createIcons();
+        }
+
+        function showLoginModal() {
+            document.getElementById('loginModal').classList.remove('hidden');
+        }
+
+        // --- AI 盤點功能 ---
+        async function askAI(userPrompt) {
+            const res = await fetch(APPS_SCRIPT_URL, {
+                method: "POST",
+                headers: { "Content-Type": "text/plain" },
+                body: JSON.stringify({ action: "askAI", prompt: userPrompt })
+            });
+            const data = await res.json();
+            return data.result || data.error || "AI 冇回應";
+        }
+
+        async function handleAISummary() {
+            const btn = document.getElementById('aiBtn');
+            const text = document.getElementById('aiBtnText');
+            btn.disabled = true;
+            text.textContent = '分析中...';
+            try {
+                const records = await loadData();
+                if (records.length === 0) {
+                    alert('目前平台沒有商品資料可供分析');
+                    return;
+                }
+                
+                // 擷取前 30 筆市集資料，整理成適合 AI 理解的文本
+                const summaryInput = records.slice(0, 30).map(r =>
+                    `[${r.type === 'sell' ? '出物' : '收物'}/${r.category}] ${r.title} - MOP ${r.price} (狀態: ${r.status})`
+                ).join('\n');
+                
+                const prompt = '以下是校園二手市集平台的最新物品清單。請使用繁體中文，用 3-5 句概括同學們目前最主要的物資需求（哪些東西最熱門）、價格分佈狀況，以及交易市場的活躍趨勢或明顯 pattern:\n\n' + summaryInput;
+                const result = await askAI(prompt);
+                alert(result);
+            } catch (e) {
+                alert('AI 分析出錯：' + e.message);
+            } finally {
+                btn.disabled = false;
+                text.textContent = 'AI 盤點';
             }
         }
 
         // --- INIT ---
-        window.onload = function() {
-            loadUser();
-            renderList();
+        window.onload = async () => {
+            loadUser(); // 保留原本讀取使用者邏輯
+            await renderList();
+            lucide.createIcons();
         };
     </script>
 </body>
