@@ -456,10 +456,8 @@
         }
 
         function updateFiltersUI() {
-            // 直接從 localStorage 讀取目前的 records 來計算數量
             const localRecords = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || "[]");
             
-            // Category Filter
             const catContainer = document.getElementById('categoryFilterContainer');
             catContainer.innerHTML = '<span class="text-[13px] font-bold text-slate-500 mr-2 shrink-0">類別篩選：</span>';
             
@@ -475,7 +473,6 @@
                 catContainer.appendChild(btn);
             });
 
-            // Status Filter
             const statusContainer = document.getElementById('statusFilterContainer');
             statusContainer.innerHTML = '<span class="text-[13px] font-bold text-slate-500 mr-2 shrink-0">狀態篩選：</span>';
             
@@ -493,7 +490,6 @@
         }
 
         // --- ACTIONS ---
-
         function openModal() {
             document.getElementById('formModal').classList.remove('hidden');
         }
@@ -558,7 +554,6 @@
                 imageBase64 = await fileToBase64(imageFile);
             }
             
-            // Data Schema
             const newRecord = {
                 id: Date.now() + "_" + Math.random().toString(36).slice(2,6),
                 createdAt: new Date().toISOString(),
@@ -566,7 +561,7 @@
                 ownerName: currentUser.name,
                 title: document.getElementById('title').value,
                 price: parseFloat(document.getElementById('price').value) || 0,
-                comment: [], // array for comments
+                comment: [],
                 description: document.getElementById('description').value,
                 category: document.getElementById('category').value,
                 type: document.querySelector('input[name="type"]:checked').value,
@@ -579,7 +574,6 @@
             closeModal();
         };
 
-        // 儲存新紀錄（先標準化，再即時渲染，不同步讀取遠端）
         async function saveData(newRecord) {
             const records = await loadData();
             const normalized = normalizeRecord(newRecord);
@@ -587,12 +581,10 @@
             localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
             await renderList(records);
             
-            // 同步至 Google Sheet 時，將 comment 轉成字串上傳避免後端解析出錯
             const uploadRecord = { ...normalized, comment: JSON.stringify(normalized.comment) };
             syncToSheet({ action: "create", record: uploadRecord });
         }
 
-        // 刪除紀錄
         async function deleteRecord(id) {
             if (!confirm("確定要刪除嗎？")) return;
             let records = await loadData();
@@ -602,7 +594,6 @@
             syncToSheet({ action: "delete", id: id });
         }
 
-        // 顯示詳情
         async function showDetails(id) {
             const records = await loadData();
             const record = records.find(r => r.id === id);
@@ -638,7 +629,6 @@
                     </div>
                 </div>
 
-                <!-- Update Status buttons if owner simulation -->
                 ${isOwnerOfSession(record) ? `
                 <div class="grid grid-cols-3 gap-2 mb-6">
                     <button onclick="updateStatus('${record.id}', 'active')" class="text-[10px] font-bold py-2 rounded-lg ${record.status === 'active' ? 'bg-primary text-white' : 'bg-slate-100 hover:bg-slate-200'}">進行中</button>
@@ -654,7 +644,6 @@
                 </div>
                 `}
 
-                <!-- Comments Section -->
                 <div class="border-t border-slate-100 pt-6">
                     <h4 class="text-sm font-black mb-4">留言 (${record.comment.length})</h4>
                     <div class="space-y-3 max-h-[300px] overflow-y-auto pr-2" id="commentList">
@@ -685,7 +674,6 @@
             document.getElementById('detailsModal').classList.add('hidden');
         }
 
-        // 更新狀態
         async function updateStatus(id, newStatus) {
             const records = await loadData();
             const index = records.findIndex(r => r.id === id);
@@ -694,7 +682,6 @@
                 localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
                 await renderList(records);
                 await showDetails(id);
-                // 上傳完整 record，comment 轉字串
                 const recordToUpload = { ...records[index], comment: JSON.stringify(records[index].comment) };
                 syncToSheet({ action: "update", id: id, record: recordToUpload });
             }
@@ -708,7 +695,6 @@
             input.focus();
         }
 
-        // 新增留言
         async function addComment(id) {
             if (!currentUser) return alert("請先登入帳號");
             const input = document.getElementById('commentInput');
@@ -728,21 +714,35 @@
                 input.value = '';
                 currentReplyTo = null;
                 await showDetails(id);
-                // 上傳完整 record，comment 轉字串
                 const recordToUpload = { ...records[idx], comment: JSON.stringify(records[idx].comment) };
                 syncToSheet({ action: "update", id: id, record: recordToUpload });
             }
         }
 
-        // ========== AI 功能 ==========
+        // ========== AI 功能（增強錯誤處理） ==========
         async function askAI(userPrompt) {
-            const res = await fetch(APPS_SCRIPT_URL, {
-                method: "POST",
-                headers: { "Content-Type": "text/plain" },
-                body: JSON.stringify({ action: "askAI", prompt: userPrompt })
-            });
-            const data = await res.json();
-            return data.result || data.error || "AI 冇回應";
+            try {
+                const res = await fetch(APPS_SCRIPT_URL, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },  // 使用正確的 JSON 標頭
+                    body: JSON.stringify({ action: "askAI", prompt: userPrompt })
+                });
+                
+                if (!res.ok) {
+                    throw new Error(`HTTP error! status: ${res.status}`);
+                }
+                
+                const data = await res.json();
+                
+                // 優先顯示有意義的錯誤或結果
+                if (data.error) {
+                    return `❌ ${data.error}`;
+                }
+                return data.result || "AI 沒有回覆內容";
+            } catch (e) {
+                console.error("askAI 請求失敗", e);
+                return `❌ 無法連線到 AI 服務 (${e.message})`;
+            }
         }
 
         async function handleAISummary() {
@@ -757,14 +757,20 @@
                     return;
                 }
                 
-                // 擷取前 30 筆市集資料，整理成適合 AI 理解的文本
                 const summaryInput = records.slice(0, 30).map(r =>
                     `[${r.type === 'sell' ? '出物' : '收物'}/${r.category}] ${r.title} - MOP ${r.price} (狀態: ${r.status})`
                 ).join('\n');
                 
                 const prompt = '以下是校園二手市集平台的最新物品清單。請使用繁體中文，用 3-5 句概括同學們目前最主要的物資需求（哪些東西最熱門）、價格分佈狀況，以及交易市場的活躍趨勢或明顯 pattern:\n\n' + summaryInput;
+                
                 const result = await askAI(prompt);
-                alert(result);
+                
+                // 若回傳內容包含特定的後端錯誤關鍵字，提供引導說明
+                if (result.includes("缺少 API Key") || result.includes("AI 暫時冇回應")) {
+                    alert("⚠️ AI 功能尚未啟用\n\n請確認已在 Google Apps Script 的「指令碼屬性」中設定 GEMINI_API_KEY，並將 _askAI 函式內的模型名稱改為有效的 Gemini 模型 (例如 gemini-1.5-flash)。");
+                } else {
+                    alert(result);
+                }
             } catch (e) {
                 alert('AI 分析出錯：' + e.message);
             } finally {
@@ -775,7 +781,7 @@
 
         // --- INIT ---
         window.onload = async function() {
-            loadUser(); // 保留原本讀取使用者邏輯
+            loadUser();
             await renderList();
             lucide.createIcons();
         };
