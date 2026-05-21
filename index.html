@@ -252,13 +252,26 @@
             };
         }
 
-        // ========== 從 Sheet 遠端讀取 ==========
+        // ========== 從 Sheet 遠端讀取（相容兩種回傳格式） ==========
         async function fetchRecordsFromSheet() {
             if (APPS_SCRIPT_URL.includes("PASTE") || !APPS_SCRIPT_URL) return null;
             try {
                 const res = await fetch(APPS_SCRIPT_URL);
                 const data = await res.json();
-                return Array.isArray(data.records) ? data.records.map(normalizeRecord) : null;
+                
+                let rawRecords = null;
+                // 相容兩種格式：直接陣列 或 { records: [...] }
+                if (Array.isArray(data)) {
+                    rawRecords = data;
+                } else if (data && Array.isArray(data.records)) {
+                    rawRecords = data.records;
+                }
+                
+                if (rawRecords) {
+                    return rawRecords.map(normalizeRecord);
+                }
+                console.warn("⚠️ 從 Sheet 收到的資料格式不符", data);
+                return null;
             } catch (e) {
                 console.warn("從 Sheet 讀取失敗", e);
                 return null;
@@ -443,7 +456,7 @@
         }
 
         function updateFiltersUI() {
-            const records = loadData(); // 注意這裡 loadData 是同步取 localStorage，不影響異步流程，但需要改成同步讀取 localStorage 因為我們只要拿計數
+            // 直接從 localStorage 讀取目前的 records 來計算數量
             const localRecords = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || "[]");
             
             // Category Filter
