@@ -46,6 +46,7 @@
                 <div id="userAccountSection" class="flex items-center gap-2">
                     <!-- Dynamic User Info -->
                 </div>
+                <!-- AI 摘要按鈕 -->
                 <button onclick="handleAISummary()" id="aiBtn" class="bg-zinc-800 text-zinc-100 px-4 py-2 rounded-full text-sm font-bold shadow-md hover:bg-zinc-700 transition-all flex items-center gap-2 active:scale-95 disabled:opacity-50">
                     <i data-lucide="sparkles" class="w-4 h-4"></i>
                     <span id="aiBtnText">AI 盤點</span>
@@ -183,8 +184,8 @@
     <!-- Scripts -->
     <script>
         // ========== GOOGLE SHEET 同步設定 ==========
-        // 請將下方 URL 換成您部署 Google Apps Script 後取得的「網頁應用程式網址」
-        const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxkkPEcOb5OU1ncfyPLk3SZ_FHHh62xfq3MYEBBYLo1QXgN5k5Xj3Y4ZnAvaOoEHneIXQ/exec"
+        const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxkkPEcOb5OU1ncfyPLk3SZ_FHHh62xfq3MYEBBYLo1QXgN5k5Xj3Y4ZnAvaOoEHneIXQ/exec";
+        
         // 非同步同步函式（不影響主流程）
         async function syncToSheet(payload) {
             if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL === "PASTE_YOUR_APPS_SCRIPT_URL_HERE") {
@@ -194,11 +195,10 @@
             try {
                 const response = await fetch(APPS_SCRIPT_URL, {
                     method: "POST",
-                    mode: "no-cors",  // 避免 CORS 問題
+                    mode: "no-cors",
                     headers: { "Content-Type": "text/plain" },
                     body: JSON.stringify(payload)
                 });
-                // 因為 no-cors 無法讀取回應，故不處理結果，只確保送出
                 console.log("同步要求已送出", payload.action, payload.id || "");
             } catch (err) {
                 console.warn("同步至 Google Sheet 失敗", err);
@@ -223,7 +223,7 @@
         };
         let currentUser = null;
 
-        // --- 資料標準化：同時支援 Sheet 大楷欄位與前端小寫欄位 ---
+        // --- 資料正規化（處理大小寫與 comment 字串解析） ---
         function normalizeRecord(record) {
             let parsedComments = [];
             try {
@@ -234,7 +234,6 @@
             } catch (e) {
                 console.warn("解析留言欄位失敗，改為空陣列", e);
             }
-
             return {
                 id: record.id || record.ID || "",
                 createdAt: record.createdAt || record.CreatedAt || "",
@@ -252,7 +251,7 @@
             };
         }
 
-        // --- 從 Sheet 讀取資料（遠端優先，localStorage 做 fallback）---
+        // --- 從 Google Sheet 讀取資料（搭配正規化） ---
         async function fetchRecordsFromSheet() {
             if (APPS_SCRIPT_URL.includes("PASTE") || !APPS_SCRIPT_URL) return null;
             try {
@@ -265,7 +264,7 @@
             }
         }
 
-        // --- 載入資料（先試遠端，失敗則用本機快取）---
+        // --- 主要資料讀取（遠端優先，本機作為快取） ---
         async function loadData() {
             const remote = await fetchRecordsFromSheet();
             if (remote) {
@@ -276,33 +275,32 @@
             return data ? JSON.parse(data) : [];
         }
 
-        // --- 儲存新紀錄（即時渲染，後台同步）---
+        // --- 新增貼文（立即更新畫面，背景同步） ---
         async function saveData(newRecord) {
             const records = await loadData();
             const normalized = normalizeRecord(newRecord);
             records.unshift(normalized);
             localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
             await renderList(records);
-            
-            // 同步至 Google Sheet 時，將 comment 轉成字串上傳避免後端解析出錯
+            // 將 comment 陣列轉為字串，避免後端解析錯誤
             const uploadRecord = { ...normalized, comment: JSON.stringify(normalized.comment) };
             syncToSheet({ action: "create", record: uploadRecord });
         }
 
-        // --- 渲染列表（可傳入 recordsOverride 避免重新拉取舊資料）---
+        // --- 顯示列表（支援傳入最新 records 避免覆蓋） ---
         async function renderList(recordsOverride) {
             const records = recordsOverride || await loadData();
             const container = document.getElementById('postList');
             container.innerHTML = '';
 
-            // Apply Filters
+            // 套用篩選
             let filtered = records.filter(r => {
                 const catMatch = currentFilter.category === '全部' || r.category === currentFilter.category;
                 const statusMatch = currentFilter.status === 'all' || r.status === currentFilter.status;
                 return catMatch && statusMatch;
             });
 
-            // Sorting Logic: Active > Reserved > Completed
+            // 排序
             const statusOrder = { 'active': 0, 'reserved': 1, 'completed': 2 };
             filtered.sort((a, b) => {
                 if (statusOrder[a.status] !== statusOrder[b.status]) {
@@ -329,8 +327,7 @@
             lucide.createIcons();
         }
 
-        // --- UI HELPERS ---
-
+        // --- 卡片元件 ---
         function createCardElement(record) {
             const div = document.createElement('div');
             const isCompleted = record.status === 'completed';
@@ -340,7 +337,6 @@
             div.className = `group bg-white border border-border rounded-2xl overflow-hidden shadow-sm hover:shadow-xl transition-all duration-300 flex flex-col relative ${isCompleted ? 'opacity-70' : ''}`;
             
             div.innerHTML = `
-                <!-- Status Overlays -->
                 ${isCompleted ? `
                     <div class="absolute inset-0 bg-white/60 backdrop-blur-[2px] z-10 flex flex-col items-center justify-center pointer-events-none">
                         <div class="text-slate-900 font-black text-xl">${record.type === 'sell' ? '已售出' : '已徵得'}</div>
@@ -353,7 +349,6 @@
                     </div>
                 ` : ''}
 
-                <!-- Image Area -->
                 <div class="h-44 bg-slate-100 overflow-hidden relative cursor-pointer" onclick="showDetails('${record.id}')">
                     <span class="absolute top-3 left-3 z-20 px-3 py-1 rounded-md text-[10px] font-black tracking-widest text-white uppercase" style="background-color: ${record.type === 'sell' ? '#8E9775' : '#94A7AE'}">
                         ${record.type === 'sell' ? 'SELL' : 'BUY'}
@@ -366,13 +361,11 @@
                     ${record.image ? `<img src="${record.image}" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />` : `<div class="w-full h-full flex items-center justify-center text-slate-300 font-bold text-xs">NO IMAGE</div>`}
                 </div>
 
-                <!-- Content Area -->
                 <div class="p-4 flex-1 flex flex-col cursor-pointer" onclick="showDetails('${record.id}')">
                     <h3 class="font-bold text-sm mb-1 line-clamp-2 min-h-[2.5rem] ${isCompleted ? 'line-through text-slate-400' : ''}">${record.title}</h3>
                     <div class="text-accent font-black text-lg ${isCompleted ? 'line-through opacity-50' : ''}">${priceText}</div>
                 </div>
 
-                <!-- Footer -->
                 <div class="p-4 pt-0 flex items-center justify-between">
                     <div class="flex items-center gap-2">
                         <div class="w-6 h-6 bg-slate-100 rounded-full flex items-center justify-center">
@@ -397,7 +390,6 @@
         }
 
         function updateFiltersUI() {
-            // 使用 records 讀取快取即可，因為我們只在 renderList 後調用
             const records = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || '[]');
             
             // Category Filter
@@ -433,7 +425,7 @@
             });
         }
 
-        // --- ACTIONS ---
+        // --- 行為函式 ---
 
         function openModal() {
             document.getElementById('formModal').classList.remove('hidden');
@@ -499,7 +491,6 @@
                 imageBase64 = await fileToBase64(imageFile);
             }
             
-            // Data Schema (使用 normalizeRecord 相容的欄位名稱)
             const newRecord = {
                 id: Date.now() + "_" + Math.random().toString(36).slice(2,6),
                 createdAt: new Date().toISOString(),
@@ -507,7 +498,7 @@
                 ownerName: currentUser.name,
                 title: document.getElementById('title').value,
                 price: parseFloat(document.getElementById('price').value) || 0,
-                comment: [], // array for comments
+                comment: [],
                 description: document.getElementById('description').value,
                 category: document.getElementById('category').value,
                 type: document.querySelector('input[name="type"]:checked').value,
@@ -520,14 +511,12 @@
             closeModal();
         };
 
-        // 修改後的 deleteRecord：先刪除 localStorage，再同步刪除至 Google Sheet
         async function deleteRecord(id) {
             if (!confirm("確定要刪除嗎？")) return;
             let records = await loadData();
             records = records.filter(r => r.id !== id);
             localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
             await renderList(records);
-            // 同步刪除至 Google Sheet
             syncToSheet({ action: "delete", id: id });
         }
 
@@ -566,7 +555,6 @@
                     </div>
                 </div>
 
-                <!-- Update Status buttons if owner simulation -->
                 ${isOwnerOfSession(record) ? `
                 <div class="grid grid-cols-3 gap-2 mb-6">
                     <button onclick="updateStatus('${record.id}', 'active')" class="text-[10px] font-bold py-2 rounded-lg ${record.status === 'active' ? 'bg-primary text-white' : 'bg-slate-100 hover:bg-slate-200'}">進行中</button>
@@ -582,7 +570,6 @@
                 </div>
                 `}
 
-                <!-- Comments Section -->
                 <div class="border-t border-slate-100 pt-6">
                     <h4 class="text-sm font-black mb-4">留言 (${record.comment.length})</h4>
                     <div class="space-y-3 max-h-[300px] overflow-y-auto pr-2" id="commentList">
@@ -613,18 +600,15 @@
             document.getElementById('detailsModal').classList.add('hidden');
         }
 
-        // 修改後的 updateStatus：更新 localStorage 後，同步完整 record 至 Google Sheet
         async function updateStatus(id, newStatus) {
-            let records = await loadData();
-            const idx = records.findIndex(r => r.id === id);
-            if (idx !== -1) {
-                records[idx].status = newStatus;
+            const records = await loadData();
+            const index = records.findIndex(r => r.id === id);
+            if (index !== -1) {
+                records[index].status = newStatus;
                 localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
                 await renderList(records);
-                await showDetails(id); // Refresh modal
-                // 同步更新後的完整 record 到 Google Sheet（comment 字串化）
-                const uploadRecord = { ...records[idx], comment: JSON.stringify(records[idx].comment) };
-                syncToSheet({ action: "update", id: id, record: uploadRecord });
+                await showDetails(id);
+                syncToSheet({ action: "update", id: id, changes: { status: newStatus } });
             }
         }
 
@@ -636,7 +620,6 @@
             input.focus();
         }
 
-        // 修改後的 addComment：更新 localStorage 後，同步完整 record 至 Google Sheet
         async function addComment(id) {
             if (!currentUser) return alert("請先登入帳號");
             const input = document.getElementById('commentInput');
@@ -657,7 +640,7 @@
                 currentReplyTo = null;
                 await renderList(records);
                 await showDetails(id);
-                // 同步更新後的完整 record（comment 字串化）
+                // 同步至 Sheet 時仍送完整 record（comment 字串化由後端處理或這裡手動轉）
                 const uploadRecord = { ...records[idx], comment: JSON.stringify(records[idx].comment) };
                 syncToSheet({ action: "update", id: id, record: uploadRecord });
             }
@@ -673,11 +656,7 @@
         async function handleLogin() {
             const username = document.getElementById('loginUsername').value.trim();
             if (!username) return alert("請輸入稱呼");
-            
-            currentUser = {
-                id: "user_" + Date.now(),
-                name: username
-            };
+            currentUser = { id: "user_" + Date.now(), name: username };
             localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(currentUser));
             document.getElementById('loginModal').classList.add('hidden');
             updateUserUI();
@@ -722,7 +701,7 @@
             document.getElementById('loginModal').classList.remove('hidden');
         }
 
-        // --- AI 盤點功能 ---
+        // --- AI 相關功能 ---
         async function askAI(userPrompt) {
             const res = await fetch(APPS_SCRIPT_URL, {
                 method: "POST",
@@ -740,16 +719,10 @@
             text.textContent = '分析中...';
             try {
                 const records = await loadData();
-                if (records.length === 0) {
-                    alert('目前平台沒有商品資料可供分析');
-                    return;
-                }
-                
-                // 擷取前 30 筆市集資料，整理成適合 AI 理解的文本
+                if (records.length === 0) { alert('目前平台沒有商品資料可供分析'); return; }
                 const summaryInput = records.slice(0, 30).map(r =>
                     `[${r.type === 'sell' ? '出物' : '收物'}/${r.category}] ${r.title} - MOP ${r.price} (狀態: ${r.status})`
                 ).join('\n');
-                
                 const prompt = '以下是校園二手市集平台的最新物品清單。請使用繁體中文，用 3-5 句概括同學們目前最主要的物資需求（哪些東西最熱門）、價格分佈狀況，以及交易市場的活躍趨勢或明顯 pattern:\n\n' + summaryInput;
                 const result = await askAI(prompt);
                 alert(result);
@@ -761,9 +734,9 @@
             }
         }
 
-        // --- INIT ---
+        // --- 初始化 ---
         window.onload = async () => {
-            loadUser(); // 保留原本讀取使用者邏輯
+            loadUser();
             await renderList();
             lucide.createIcons();
         };
