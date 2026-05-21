@@ -719,29 +719,39 @@
             }
         }
 
-        // ========== AI 功能（增強錯誤處理） ==========
+        // ========== AI 功能（終極診斷版） ==========
         async function askAI(userPrompt) {
             try {
                 const res = await fetch(APPS_SCRIPT_URL, {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },  // 使用正確的 JSON 標頭
+                    headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ action: "askAI", prompt: userPrompt })
                 });
                 
+                // 強制讀取回應文字，無論是否為 JSON
+                const rawText = await res.text();
+                console.log("AI 原始回應:", rawText);
+                
                 if (!res.ok) {
-                    throw new Error(`HTTP error! status: ${res.status}`);
+                    throw new Error(`HTTP ${res.status}: ${rawText}`);
                 }
                 
-                const data = await res.json();
+                // 嘗試解析 JSON
+                let data;
+                try {
+                    data = JSON.parse(rawText);
+                } catch (parseErr) {
+                    return `❌ 後端回傳了非 JSON 格式的內容：\n${rawText.substring(0, 200)}`;
+                }
                 
-                // 優先顯示有意義的錯誤或結果
+                // 顯示後端給的 error 或 result
                 if (data.error) {
                     return `❌ ${data.error}`;
                 }
-                return data.result || "AI 沒有回覆內容";
+                return data.result || "AI 沒有回覆內容 (result 欄位為空)";
             } catch (e) {
                 console.error("askAI 請求失敗", e);
-                return `❌ 無法連線到 AI 服務 (${e.message})`;
+                return `❌ 無法連線到 AI 服務\n${e.message}`;
             }
         }
 
@@ -765,11 +775,12 @@
                 
                 const result = await askAI(prompt);
                 
-                // 若回傳內容包含特定的後端錯誤關鍵字，提供引導說明
-                if (result.includes("缺少 API Key") || result.includes("AI 暫時冇回應")) {
-                    alert("⚠️ AI 功能尚未啟用\n\n請確認已在 Google Apps Script 的「指令碼屬性」中設定 GEMINI_API_KEY，並將 _askAI 函式內的模型名稱改為有效的 Gemini 模型 (例如 gemini-1.5-flash)。");
-                } else {
-                    alert(result);
+                // 將完整結果顯示給使用者，不做過濾
+                alert(result);
+                
+                // 若結果明顯為錯誤，額外在控制台提示可能的修復方向
+                if (result.includes("AI 暫時冇回應") || result.includes("缺少 API Key")) {
+                    console.warn("🔧 請檢查 Google Apps Script 後端：\n1. 指令碼屬性中的 GEMINI_API_KEY 是否正確\n2. _askAI 函式中的模型名稱是否為有效模型 (例如 gemini-1.5-flash)\n3. 重新部署為新版本後再試");
                 }
             } catch (e) {
                 alert('AI 分析出錯：' + e.message);
