@@ -186,20 +186,18 @@
         // ========== GOOGLE SHEET 同步設定 ==========
         const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyLIzrba-rdfdxcBSWU0TUYo4qsWru89mnGjwUKVh4vvyr66kTzZdceJI8gdBtihHCulA/exec";
         
-        // 非同步同步函式（不影響主流程）
+        // 【核心修復 1】：徹底移除 mode: "no-cors"，確保 JSON Body 100% 送達 GAS
         async function syncToSheet(payload) {
             if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.includes("PASTE")) return;
             try {
-                // 使用 text/plain 避免 CORS OPTIONS 預檢請求，並強制 UTF-8 防止中文亂碼
                 await fetch(APPS_SCRIPT_URL, {
                     method: "POST",
-                    mode: "no-cors",  
-                    headers: { "Content-Type": "text/plain;charset=utf-8" },
+                    headers: { "Content-Type": "text/plain;charset=utf-8" }, // 使用 text/plain 避免 CORS 預檢
                     body: JSON.stringify(payload)
                 });
-                console.log("✅ 同步要求已送出", payload.action, payload.id || "");
             } catch (err) {
-                console.warn("❌ 同步至 Google Sheet 失敗", err);
+                // 即使瀏覽器因 CORS 阻擋回應讀取，GAS 通常已經執行寫入，故僅警告不中斷
+                console.warn("同步請求已發出 (CORS 警告不影響寫入)", err);
             }
         }
         
@@ -214,36 +212,33 @@
             { id: 'completed', name: '已售出' }
         ];
 
-        let currentFilter = { category: '全部', status: 'all' };
+        // --- STATE ---
+        let currentFilter = {
+            category: '全部',
+            status: 'all'
+        };
         let currentUser = null;
 
-        // ========== 標準化函式（增強容錯與多欄位相容） ==========
+        // ========== 標準化函式（增強容錯，兼容各種 GAS 寫法） ==========
         function normalizeRecord(record) {
             let parsedComments = [];
             try {
-                // 窮舉所有可能的表頭名稱，防止 GAS 大小寫不匹配
-                const rawComment = record.comment || record.Comment || record.comments || record.Comments || record.留言 || record.評論;
+                // 窮舉所有可能的表頭名稱
+                const rawComment = record.comment || record.Comment || record.comments || record.Comments;
                 if (rawComment) {
                     if (typeof rawComment === 'string') {
-                        try {
-                            parsedComments = JSON.parse(rawComment);
-                            if (!Array.isArray(parsedComments)) parsedComments = [];
-                        } catch (jsonErr) {
-                            // 【容錯機制】若 Sheet 中的 JSON 格式被破壞，則作為單條純文字保留，避免資料丟失
-                            parsedComments = [{
-                                text: String(rawComment),
-                                user: "系統備份",
-                                time: new Date().toISOString(),
-                                replyTo: null
-                            }];
+                        try { 
+                            parsedComments = JSON.parse(rawComment); 
+                            if (!Array.isArray(parsedComments)) parsedComments = []; 
+                        } catch (e) { 
+                            // 若 GAS 意外將 JSON 轉為純文字，則手動包裝為單條留言
+                            parsedComments = [{ text: String(rawComment), user: "系統備份", time: new Date().toISOString(), replyTo: null }]; 
                         }
-                    } else if (Array.isArray(rawComment)) {
-                        parsedComments = rawComment;
+                    } else if (Array.isArray(rawComment)) { 
+                        parsedComments = rawComment; 
                     }
                 }
-            } catch (e) {
-                console.warn("解析留言欄位失敗", e);
-            }
+            } catch (e) { console.warn("解析留言欄位失敗", e); }
 
             return {
                 id: record.id || record.ID || "",
@@ -291,6 +286,7 @@
             return data ? JSON.parse(data) : [];
         }
 
+        // --- 使用者相關 ---
         function loadUser() {
             const data = localStorage.getItem(USER_STORAGE_KEY);
             currentUser = data ? JSON.parse(data) : null;
@@ -320,24 +316,32 @@
             if (currentUser) {
                 container.innerHTML = `
                     <div class="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-full border border-slate-100">
-                        <div class="w-6 h-6 bg-primary text-white rounded-full flex items-center justify-center text-[10px] font-bold">${currentUser.name.charAt(0)}</div>
+                        <div class="w-6 h-6 bg-primary text-white rounded-full flex items-center justify-center text-[10px] font-bold">
+                            ${currentUser.name.charAt(0)}
+                        </div>
                         <span class="text-xs font-bold text-slate-600">${currentUser.name}</span>
                         <button onclick="handleLogout()" class="flex items-center gap-1 text-slate-300 hover:text-red-500 transition-colors ml-1 p-1" title="登出">
                             <i data-lucide="log-out" class="w-4 h-4"></i>
                             <span class="text-[10px] font-bold">登出</span>
                         </button>
-                    </div>`;
+                    </div>
+                `;
             } else {
                 container.innerHTML = `
                     <button onclick="showLoginModal()" class="text-xs font-bold text-slate-400 hover:text-primary transition-colors flex items-center gap-1">
-                        <i data-lucide="user-plus" class="w-4 h-4"></i> 登入
-                    </button>`;
+                        <i data-lucide="user-plus" class="w-4 h-4"></i>
+                        登入
+                    </button>
+                `;
             }
             lucide.createIcons();
         }
 
-        function showLoginModal() { document.getElementById('loginModal').classList.remove('hidden'); }
+        function showLoginModal() {
+            document.getElementById('loginModal').classList.remove('hidden');
+        }
 
+        // ========== 核心渲染 ==========
         async function renderList(recordsOverride) {
             const records = recordsOverride || await loadData();
             const container = document.getElementById('postList');
@@ -356,7 +360,12 @@
             });
 
             if (filtered.length === 0) {
-                container.innerHTML = `<div class="col-span-full py-20 text-center"><div class="text-slate-300 mb-4"><i data-lucide="inbox" class="w-16 h-16 mx-auto"></i></div><p class="text-slate-400 font-medium">暫無相關貼文</p></div>`;
+                container.innerHTML = `
+                    <div class="col-span-full py-20 text-center">
+                        <div class="text-slate-300 mb-4"><i data-lucide="inbox" class="w-16 h-16 mx-auto"></i></div>
+                        <p class="text-slate-400 font-medium">暫無相關貼文</p>
+                    </div>
+                `;
             } else {
                 filtered.forEach(record => container.appendChild(createCardElement(record)));
             }
@@ -390,7 +399,8 @@
                     <div class="flex items-center gap-2 text-slate-400">
                         <div class="flex items-center gap-1"><i data-lucide="message-square" class="w-3.5 h-3.5"></i><span class="text-[11px] font-bold">${record.comment.length}</span></div>
                     </div>
-                </div>`;
+                </div>
+            `;
             return div;
         }
 
@@ -421,6 +431,7 @@
             });
         }
 
+        // --- ACTIONS ---
         function openModal() { document.getElementById('formModal').classList.remove('hidden'); }
         function closeModal() {
             document.getElementById('formModal').classList.add('hidden');
@@ -492,19 +503,11 @@
             await renderList(records);
             
             const commentStr = JSON.stringify(normalized.comment);
-            // 【關鍵修復】：窮舉所有可能的欄位名稱，並同時放在根目錄與 record 物件中
-            const uploadData = {
-                ...normalized,
-                comment: commentStr,
-                Comment: commentStr,
-                comments: commentStr,
-                Comments: commentStr
-            };
-            
-            syncToSheet({ 
+            await syncToSheet({ 
                 action: "create", 
-                record: uploadData,
-                ...uploadData // 兼容直接讀取根屬性的 GAS 代碼
+                comment: commentStr, 
+                Comment: commentStr,
+                record: { ...normalized, comment: commentStr, Comment: commentStr } 
             });
         }
 
@@ -514,7 +517,7 @@
             records = records.filter(r => r.id !== id);
             localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
             await renderList(records);
-            syncToSheet({ action: "delete", id: id });
+            await syncToSheet({ action: "delete", id: id });
         }
 
         async function showDetails(id, useLocal = false) {
@@ -550,13 +553,15 @@
                     <button onclick="updateStatus('${record.id}', 'active')" class="text-[10px] font-bold py-2 rounded-lg ${record.status === 'active' ? 'bg-primary text-white' : 'bg-slate-100 hover:bg-slate-200'}">進行中</button>
                     <button onclick="updateStatus('${record.id}', 'reserved')" class="text-[10px] font-bold py-2 rounded-lg ${record.status === 'reserved' ? 'bg-accent text-white' : 'bg-accent/10 text-accent hover:bg-accent/20'}">已預訂</button>
                     <button onclick="updateStatus('${record.id}', 'completed')" class="text-[10px] font-bold py-2 rounded-lg ${record.status === 'completed' ? 'bg-slate-900 text-white shadow-lg' : 'bg-slate-100 font-bold'}">已售出</button>
-                </div>` : `
+                </div>
+                ` : `
                 <div class="mb-6 p-3 bg-slate-50 rounded-xl flex items-center justify-between">
                     <span class="text-xs font-bold text-slate-400">當前狀態</span>
                     <span class="text-xs font-bold ${record.status === 'completed' ? 'text-slate-900' : (record.status === 'reserved' ? 'text-accent' : 'text-primary')} uppercase">
                         ${record.status === 'completed' ? '已售出' : (record.status === 'reserved' ? '已預訂' : '進行中')}
                     </span>
-                </div>`}
+                </div>
+                `}
                 <div class="border-t border-slate-100 pt-6">
                     <h4 class="text-sm font-black mb-4">留言 (${record.comment.length})</h4>
                     <div class="space-y-3 max-h-[300px] overflow-y-auto pr-2" id="commentList">
@@ -569,19 +574,22 @@
                                 <p class="text-slate-600">${c.text}</p>
                                 ${c.replyTo ? `<div class="mt-1 text-[10px] text-primary font-bold">回覆 @${c.replyTo}</div>` : ''}
                                 <button onclick="prepareReply('${record.id}', '${c.user || '匿名校友'}')" class="text-[10px] text-slate-300 group-hover/comment:text-primary mt-1 font-bold">回覆</button>
-                            </div>`).join('')}
+                            </div>
+                        `).join('')}
                     </div>
                     <div class="mt-4 flex gap-2">
                         <input type="text" id="commentInput" class="flex-1 bg-slate-50 border-none rounded-xl p-3 text-xs" placeholder="${currentUser ? '輸入留言...' : '請先登入以留言'}" ${currentUser ? '' : 'disabled'}>
                         <button onclick="addComment('${record.id}')" class="bg-primary text-white p-3 rounded-xl" ${currentUser ? '' : 'disabled'}><i data-lucide="send" class="w-4 h-4"></i></button>
                     </div>
-                </div>`;
+                </div>
+            `;
             modal.classList.remove('hidden');
             lucide.createIcons();
         }
 
         function hideDetails() { document.getElementById('detailsModal').classList.add('hidden'); }
 
+        // 【核心修復 2】：狀態更新時，窮舉所有 comment 欄位名稱
         async function updateStatus(id, newStatus) {
             let records = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || "[]");
             const index = records.findIndex(r => r.id === id);
@@ -592,22 +600,20 @@
                 await showDetails(id, true);  
                 
                 const commentStr = JSON.stringify(records[index].comment);
-                const uploadData = {
-                    ...records[index],
-                    status: newStatus,
-                    Status: newStatus,
-                    comment: commentStr,
-                    Comment: commentStr
-                };
-                
-                syncToSheet({ 
+                await syncToSheet({ 
                     action: "update", 
                     id: id, 
-                    record: uploadData,
-                    status: newStatus,
+                    status: newStatus, 
                     Status: newStatus,
-                    comment: commentStr,
-                    Comment: commentStr
+                    comment: commentStr, 
+                    Comment: commentStr,
+                    record: { 
+                        ...records[index], 
+                        status: newStatus, 
+                        Status: newStatus, 
+                        comment: commentStr, 
+                        Comment: commentStr 
+                    } 
                 });
             }
         }
@@ -620,6 +626,7 @@
             input.focus();
         }
 
+        // 【核心修復 3】：留言時全方位窮舉 Payload，並強制延遲刷新
         async function addComment(id) {
             if (!currentUser) return alert("請先登入帳號");
             const input = document.getElementById('commentInput');
@@ -642,26 +649,33 @@
                 await renderList(records);
                 await showDetails(id, true);
                 
-                // 【關鍵修復】：窮舉所有可能的欄位名稱與層級，確保 GAS 無論如何都能接收到
                 const commentStr = JSON.stringify(records[idx].comment);
-                const uploadData = {
-                    ...records[idx],
-                    comment: commentStr,
-                    Comment: commentStr,
-                    comments: commentStr,
-                    Comments: commentStr
-                };
-                
-                syncToSheet({ 
+                const payload = {
                     action: "update", 
-                    id: id, 
-                    record: uploadData,
-                    comment: commentStr,
-                    Comment: commentStr
-                });
+                    id: id,
+                    comment: commentStr, 
+                    Comment: commentStr, 
+                    comments: commentStr,
+                    record: { 
+                        ...records[idx], 
+                        comment: commentStr, 
+                        Comment: commentStr,
+                        comments: commentStr
+                    }
+                };
+                await syncToSheet(payload);
+
+                // 延遲 2 秒後強制從 Sheets 重新拉取，確保雲端數據同步
+                setTimeout(async () => {
+                    await renderList();
+                    if (!document.getElementById('detailsModal').classList.contains('hidden')) {
+                        await showDetails(id, false);
+                    }
+                }, 2000);
             }
         }
 
+        // ========== AI 功能 ==========
         async function askAI(userPrompt) {
             try {
                 const res = await fetch(APPS_SCRIPT_URL, {
@@ -684,14 +698,15 @@
             btn.disabled = true; text.textContent = '分析中...';
             try {
                 const records = await loadData();
-                if (records.length === 0) { alert('目前沒有商品資料'); return; }
+                if (records.length === 0) { alert('目前平台沒有商品資料可供分析'); return; }
                 const summaryInput = records.slice(0, 30).map(r => `[${r.type === 'sell' ? '出物' : '收物'}/${r.category}] ${r.title} - MOP ${r.price} (狀態: ${r.status})`).join('\n');
-                const prompt = '以下是校園二手市集平台的最新物品清單。請使用繁體中文，用 3-5 句概括同學們目前最主要的物資需求、價格分佈狀況，以及交易市場的活躍趨勢:\n\n' + summaryInput;
+                const prompt = '以下是校園二手市集平台的最新物品清單。請使用繁體中文，用 3-5 句概括同學們目前最主要的物資需求（哪些東西最熱門）、價格分佈狀況，以及交易市場的活躍趨勢或明顯 pattern:\n\n' + summaryInput;
                 alert(await askAI(prompt));
             } catch (e) { alert('AI 分析出錯：' + e.message); } 
             finally { btn.disabled = false; text.textContent = 'AI 盤點'; }
         }
 
+        // --- INIT ---
         window.onload = async function() {
             loadUser();
             await renderList();
