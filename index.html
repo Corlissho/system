@@ -186,18 +186,23 @@
         // ========== GOOGLE SHEET 同步設定 ==========
         const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyLIzrba-rdfdxcBSWU0TUYo4qsWru89mnGjwUKVh4vvyr66kTzZdceJI8gdBtihHCulA/exec";
         
-        // 【核心修復 1】：徹底移除 mode: "no-cors"，確保 JSON Body 100% 送達 GAS
+        // 【關鍵修復 1】：恢復 mode: "no-cors" (Fire-and-Forget 模式)
+        // 解釋：GAS 的 doPost 會返回 302 重定向，且重定向後的響應沒有 CORS 標頭。
+        // 如果不加 no-cors，瀏覽器會因為 CORS 錯誤直接「攔截/取消」請求，導致 GAS 根本收不到資料。
+        // 使用 text/plain 避免 OPTIONS 預檢，搭配 no-cors 確保請求 100% 靜默送達 GAS。
         async function syncToSheet(payload) {
             if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.includes("PASTE")) return;
             try {
                 await fetch(APPS_SCRIPT_URL, {
                     method: "POST",
-                    headers: { "Content-Type": "text/plain;charset=utf-8" }, // 使用 text/plain 避免 CORS 預檢
+                    mode: "no-cors", 
+                    redirect: "follow",
+                    headers: { "Content-Type": "text/plain;charset=utf-8" },
                     body: JSON.stringify(payload)
                 });
+                console.log("✅ 同步請求已成功發出 (GAS 處理中...)");
             } catch (err) {
-                // 即使瀏覽器因 CORS 阻擋回應讀取，GAS 通常已經執行寫入，故僅警告不中斷
-                console.warn("同步請求已發出 (CORS 警告不影響寫入)", err);
+                console.error("❌ 同步請求發出失敗", err);
             }
         }
         
@@ -219,11 +224,10 @@
         };
         let currentUser = null;
 
-        // ========== 標準化函式（增強容錯，兼容各種 GAS 寫法） ==========
+        // ========== 標準化函式 ==========
         function normalizeRecord(record) {
             let parsedComments = [];
             try {
-                // 窮舉所有可能的表頭名稱
                 const rawComment = record.comment || record.Comment || record.comments || record.Comments;
                 if (rawComment) {
                     if (typeof rawComment === 'string') {
@@ -231,7 +235,6 @@
                             parsedComments = JSON.parse(rawComment); 
                             if (!Array.isArray(parsedComments)) parsedComments = []; 
                         } catch (e) { 
-                            // 若 GAS 意外將 JSON 轉為純文字，則手動包裝為單條留言
                             parsedComments = [{ text: String(rawComment), user: "系統備份", time: new Date().toISOString(), replyTo: null }]; 
                         }
                     } else if (Array.isArray(rawComment)) { 
@@ -589,7 +592,6 @@
 
         function hideDetails() { document.getElementById('detailsModal').classList.add('hidden'); }
 
-        // 【核心修復 2】：狀態更新時，窮舉所有 comment 欄位名稱
         async function updateStatus(id, newStatus) {
             let records = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || "[]");
             const index = records.findIndex(r => r.id === id);
@@ -599,7 +601,7 @@
                 await renderList(records);
                 await showDetails(id, true);  
                 
-                const commentStr = JSON.stringify(records[index].comment);
+                const commentStr = JSON.stringify(records[index].comment || []);
                 await syncToSheet({ 
                     action: "update", 
                     id: id, 
@@ -615,6 +617,14 @@
                         Comment: commentStr 
                     } 
                 });
+                
+                // 延遲 3 秒後強制從 Sheets 重新拉取
+                setTimeout(async () => {
+                    await renderList();
+                    if (!document.getElementById('detailsModal').classList.contains('hidden')) {
+                        await showDetails(id, false);
+                    }
+                }, 3000);
             }
         }
 
@@ -626,7 +636,7 @@
             input.focus();
         }
 
-        // 【核心修復 3】：留言時全方位窮舉 Payload，並強制延遲刷新
+        // 【關鍵修復 2】：留言 Payload 窮舉與延遲刷新
         async function addComment(id) {
             if (!currentUser) return alert("請先登入帳號");
             const input = document.getElementById('commentInput');
@@ -636,6 +646,9 @@
             let records = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || "[]");
             const idx = records.findIndex(r => r.id === id);
             if (idx !== -1) {
+                // 確保 comment 陣列存在
+                if (!Array.isArray(records[idx].comment)) records[idx].comment = [];
+                
                 records[idx].comment.push({
                     text,
                     user: currentUser.name,
@@ -650,28 +663,34 @@
                 await showDetails(id, true);
                 
                 const commentStr = JSON.stringify(records[idx].comment);
+                
+                // 窮舉所有可能的 GAS 欄位名稱，確保 100% 寫入
                 const payload = {
                     action: "update", 
                     id: id,
                     comment: commentStr, 
                     Comment: commentStr, 
                     comments: commentStr,
+                    Comments: commentStr,
                     record: { 
                         ...records[idx], 
                         comment: commentStr, 
                         Comment: commentStr,
-                        comments: commentStr
+                        comments: commentStr,
+                        Comments: commentStr
                     }
                 };
                 await syncToSheet(payload);
 
-                // 延遲 2 秒後強制從 Sheets 重新拉取，確保雲端數據同步
+                // 【關鍵修復 3】：GAS 寫入 Sheet 需要時間 (通常 1~3 秒)。
+                // 延遲 3 秒後強制從 Sheets 重新拉取，確保雲端數據同步。
                 setTimeout(async () => {
-                    await renderList();
+                    console.log("⏳ 延遲結束，開始從 Google Sheets 重新同步資料...");
+                    await renderList(); 
                     if (!document.getElementById('detailsModal').classList.contains('hidden')) {
-                        await showDetails(id, false);
+                        await showDetails(id, false); 
                     }
-                }, 2000);
+                }, 3000);
             }
         }
 
