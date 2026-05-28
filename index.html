@@ -188,20 +188,18 @@
         
         // 非同步同步函式（不影響主流程）
         async function syncToSheet(payload) {
-            if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL === "PASTE_YOUR_APPS_SCRIPT_URL_HERE") {
-                console.warn("尚未設定 APPS_SCRIPT_URL，跳過同步至 Google Sheet");
-                return;
-            }
+            if (!APPS_SCRIPT_URL || APPS_SCRIPT_URL.includes("PASTE")) return;
             try {
-                const response = await fetch(APPS_SCRIPT_URL, {
+                // 使用 text/plain 避免 CORS OPTIONS 預檢請求，並強制 UTF-8 防止中文亂碼
+                await fetch(APPS_SCRIPT_URL, {
                     method: "POST",
-                    mode: "no-cors",  // 避免 CORS 問題
-                    headers: { "Content-Type": "text/plain" },
+                    mode: "no-cors",  
+                    headers: { "Content-Type": "text/plain;charset=utf-8" },
                     body: JSON.stringify(payload)
                 });
-                console.log("同步要求已送出", payload.action, payload.id || "");
+                console.log("✅ 同步要求已送出", payload.action, payload.id || "");
             } catch (err) {
-                console.warn("同步至 Google Sheet 失敗", err);
+                console.warn("❌ 同步至 Google Sheet 失敗", err);
             }
         }
         
@@ -216,30 +214,42 @@
             { id: 'completed', name: '已售出' }
         ];
 
-        // --- STATE ---
-        let currentFilter = {
-            category: '全部',
-            status: 'all'
-        };
+        let currentFilter = { category: '全部', status: 'all' };
         let currentUser = null;
 
-        // ========== 標準化函式（兼容 Sheet 大小寫） ==========
+        // ========== 標準化函式（增強容錯與多欄位相容） ==========
         function normalizeRecord(record) {
             let parsedComments = [];
             try {
-                if (record.comment || record.Comment) {
-                    const rawComment = record.comment || record.Comment;
-                    parsedComments = typeof rawComment === 'string' ? JSON.parse(rawComment) : rawComment;
+                // 窮舉所有可能的表頭名稱，防止 GAS 大小寫不匹配
+                const rawComment = record.comment || record.Comment || record.comments || record.Comments || record.留言 || record.評論;
+                if (rawComment) {
+                    if (typeof rawComment === 'string') {
+                        try {
+                            parsedComments = JSON.parse(rawComment);
+                            if (!Array.isArray(parsedComments)) parsedComments = [];
+                        } catch (jsonErr) {
+                            // 【容錯機制】若 Sheet 中的 JSON 格式被破壞，則作為單條純文字保留，避免資料丟失
+                            parsedComments = [{
+                                text: String(rawComment),
+                                user: "系統備份",
+                                time: new Date().toISOString(),
+                                replyTo: null
+                            }];
+                        }
+                    } else if (Array.isArray(rawComment)) {
+                        parsedComments = rawComment;
+                    }
                 }
             } catch (e) {
-                console.warn("解析留言欄位失敗，改為空陣列", e);
+                console.warn("解析留言欄位失敗", e);
             }
 
             return {
                 id: record.id || record.ID || "",
                 createdAt: record.createdAt || record.CreatedAt || "",
-                ownerId: record.ownerId || record.ownerId || "",
-                ownerName: record.ownerName || record.ownerName || "",
+                ownerId: record.ownerId || record.OwnerId || "",
+                ownerName: record.ownerName || record.OwnerName || "",
                 title: record.title || record.Title || "",
                 price: Number(record.price !== undefined ? record.price : (record.Price || 0)),
                 description: record.description || record.Description || "",
@@ -252,25 +262,14 @@
             };
         }
 
-        // ========== 從 Sheet 遠端讀取（相容兩種回傳格式） ==========
+        // ========== 從 Sheet 遠端讀取 ==========
         async function fetchRecordsFromSheet() {
             if (APPS_SCRIPT_URL.includes("PASTE") || !APPS_SCRIPT_URL) return null;
             try {
                 const res = await fetch(APPS_SCRIPT_URL);
                 const data = await res.json();
-                
-                let rawRecords = null;
-                // 相容兩種格式：直接陣列 或 { records: [...] }
-                if (Array.isArray(data)) {
-                    rawRecords = data;
-                } else if (data && Array.isArray(data.records)) {
-                    rawRecords = data.records;
-                }
-                
-                if (rawRecords) {
-                    return rawRecords.map(normalizeRecord);
-                }
-                console.warn("⚠️ 從 Sheet 收到的資料格式不符", data);
+                let rawRecords = Array.isArray(data) ? data : (data && Array.isArray(data.records) ? data.records : null);
+                if (rawRecords) return rawRecords.map(normalizeRecord);
                 return null;
             } catch (e) {
                 console.warn("從 Sheet 讀取失敗", e);
@@ -278,14 +277,11 @@
             }
         }
 
-        // ========== 主要資料載入（遠端優先，本機 fallback） ==========
         async function loadData(forceLocal = false) {
-            // 如果強制使用本地資料，直接從 localStorage 讀取
             if (forceLocal) {
                 const data = localStorage.getItem(LOCAL_STORAGE_KEY);
                 return data ? JSON.parse(data) : [];
             }
-            
             const remote = await fetchRecordsFromSheet();
             if (remote) {
                 localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(remote));
@@ -295,7 +291,6 @@
             return data ? JSON.parse(data) : [];
         }
 
-        // --- 使用者相關 ---
         function loadUser() {
             const data = localStorage.getItem(USER_STORAGE_KEY);
             currentUser = data ? JSON.parse(data) : null;
@@ -305,11 +300,7 @@
         async function handleLogin() {
             const username = document.getElementById('loginUsername').value.trim();
             if (!username) return alert("請輸入稱呼");
-            
-            currentUser = {
-                id: "user_" + Date.now(),
-                name: username
-            };
+            currentUser = { id: "user_" + Date.now(), name: username };
             localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(currentUser));
             document.getElementById('loginModal').classList.add('hidden');
             updateUserUI();
@@ -329,177 +320,108 @@
             if (currentUser) {
                 container.innerHTML = `
                     <div class="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-full border border-slate-100">
-                        <div class="w-6 h-6 bg-primary text-white rounded-full flex items-center justify-center text-[10px] font-bold">
-                            ${currentUser.name.charAt(0)}
-                        </div>
+                        <div class="w-6 h-6 bg-primary text-white rounded-full flex items-center justify-center text-[10px] font-bold">${currentUser.name.charAt(0)}</div>
                         <span class="text-xs font-bold text-slate-600">${currentUser.name}</span>
                         <button onclick="handleLogout()" class="flex items-center gap-1 text-slate-300 hover:text-red-500 transition-colors ml-1 p-1" title="登出">
                             <i data-lucide="log-out" class="w-4 h-4"></i>
                             <span class="text-[10px] font-bold">登出</span>
                         </button>
-                    </div>
-                `;
+                    </div>`;
             } else {
                 container.innerHTML = `
                     <button onclick="showLoginModal()" class="text-xs font-bold text-slate-400 hover:text-primary transition-colors flex items-center gap-1">
-                        <i data-lucide="user-plus" class="w-4 h-4"></i>
-                        登入
-                    </button>
-                `;
+                        <i data-lucide="user-plus" class="w-4 h-4"></i> 登入
+                    </button>`;
             }
             lucide.createIcons();
         }
 
-        function showLoginModal() {
-            document.getElementById('loginModal').classList.remove('hidden');
-        }
+        function showLoginModal() { document.getElementById('loginModal').classList.remove('hidden'); }
 
-        // ========== 核心渲染（支援直接傳入 records 避免覆蓋） ==========
         async function renderList(recordsOverride) {
             const records = recordsOverride || await loadData();
             const container = document.getElementById('postList');
             container.innerHTML = '';
 
-            // Apply Filters
             let filtered = records.filter(r => {
                 const catMatch = currentFilter.category === '全部' || r.category === currentFilter.category;
                 const statusMatch = currentFilter.status === 'all' || r.status === currentFilter.status;
                 return catMatch && statusMatch;
             });
 
-            // Sorting Logic: Active > Reserved > Completed
             const statusOrder = { 'active': 0, 'reserved': 1, 'completed': 2 };
             filtered.sort((a, b) => {
-                if (statusOrder[a.status] !== statusOrder[b.status]) {
-                    return statusOrder[a.status] - statusOrder[b.status];
-                }
+                if (statusOrder[a.status] !== statusOrder[b.status]) return statusOrder[a.status] - statusOrder[b.status];
                 return new Date(b.createdAt) - new Date(a.createdAt);
             });
 
             if (filtered.length === 0) {
-                container.innerHTML = `
-                    <div class="col-span-full py-20 text-center">
-                        <div class="text-slate-300 mb-4"><i data-lucide="inbox" class="w-16 h-16 mx-auto"></i></div>
-                        <p class="text-slate-400 font-medium">暫無相關貼文</p>
-                    </div>
-                `;
+                container.innerHTML = `<div class="col-span-full py-20 text-center"><div class="text-slate-300 mb-4"><i data-lucide="inbox" class="w-16 h-16 mx-auto"></i></div><p class="text-slate-400 font-medium">暫無相關貼文</p></div>`;
             } else {
-                filtered.forEach(record => {
-                    const card = createCardElement(record);
-                    container.appendChild(card);
-                });
+                filtered.forEach(record => container.appendChild(createCardElement(record)));
             }
-            
             updateFiltersUI();
             lucide.createIcons();
         }
-
-        // --- UI HELPERS ---
 
         function createCardElement(record) {
             const div = document.createElement('div');
             const isCompleted = record.status === 'completed';
             const isReserved = record.status === 'reserved';
             const priceText = record.price == 0 ? '免費' : `$${record.price}`;
-            
             div.className = `group bg-white border border-border rounded-2xl overflow-hidden shadow-sm hover:shadow-xl transition-all duration-300 flex flex-col relative ${isCompleted ? 'opacity-70' : ''}`;
-            
             div.innerHTML = `
-                <!-- Status Overlays -->
-                ${isCompleted ? `
-                    <div class="absolute inset-0 bg-white/60 backdrop-blur-[2px] z-10 flex flex-col items-center justify-center pointer-events-none">
-                        <div class="text-slate-900 font-black text-xl">${record.type === 'sell' ? '已售出' : '已徵得'}</div>
-                        <div class="absolute top-1/2 left-0 w-full h-1 bg-slate-900/40 -translate-y-1/2 rotate-[-5deg] scale-x-110"></div>
-                    </div>
-                ` : ''}
-                ${isReserved ? `
-                    <div class="absolute inset-0 bg-accent/20 backdrop-blur-[1px] z-10 flex items-center justify-center pointer-events-none">
-                        <div class="bg-accent text-white px-4 py-1 rounded-full font-bold text-xs shadow-lg">已預訂</div>
-                    </div>
-                ` : ''}
-
-                <!-- Image Area -->
+                ${isCompleted ? `<div class="absolute inset-0 bg-white/60 backdrop-blur-[2px] z-10 flex flex-col items-center justify-center pointer-events-none"><div class="text-slate-900 font-black text-xl">${record.type === 'sell' ? '已售出' : '已徵得'}</div><div class="absolute top-1/2 left-0 w-full h-1 bg-slate-900/40 -translate-y-1/2 rotate-[-5deg] scale-x-110"></div></div>` : ''}
+                ${isReserved ? `<div class="absolute inset-0 bg-accent/20 backdrop-blur-[1px] z-10 flex items-center justify-center pointer-events-none"><div class="bg-accent text-white px-4 py-1 rounded-full font-bold text-xs shadow-lg">已預訂</div></div>` : ''}
                 <div class="h-44 bg-slate-100 overflow-hidden relative cursor-pointer" onclick="showDetails('${record.id}')">
-                    <span class="absolute top-3 left-3 z-20 px-3 py-1 rounded-md text-[10px] font-black tracking-widest text-white uppercase" style="background-color: ${record.type === 'sell' ? '#8E9775' : '#94A7AE'}">
-                        ${record.type === 'sell' ? 'SELL' : 'BUY'}
-                    </span>
-                    ${isOwnerOfSession(record) ? `
-                    <button onclick="event.stopPropagation(); deleteRecord('${record.id}')" class="absolute top-3 right-3 z-20 w-8 h-8 bg-white/80 backdrop-blur-md rounded-full flex items-center justify-center text-red-500 hover:bg-red-50 transition-all opacity-0 group-hover:opacity-100">
-                        <i data-lucide="trash-2" class="w-4 h-4"></i>
-                    </button>
-                    ` : ''}
+                    <span class="absolute top-3 left-3 z-20 px-3 py-1 rounded-md text-[10px] font-black tracking-widest text-white uppercase" style="background-color: ${record.type === 'sell' ? '#8E9775' : '#94A7AE'}">${record.type === 'sell' ? 'SELL' : 'BUY'}</span>
+                    ${isOwnerOfSession(record) ? `<button onclick="event.stopPropagation(); deleteRecord('${record.id}')" class="absolute top-3 right-3 z-20 w-8 h-8 bg-white/80 backdrop-blur-md rounded-full flex items-center justify-center text-red-500 hover:bg-red-50 transition-all opacity-0 group-hover:opacity-100"><i data-lucide="trash-2" class="w-4 h-4"></i></button>` : ''}
                     ${record.image ? `<img src="${record.image}" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />` : `<div class="w-full h-full flex items-center justify-center text-slate-300 font-bold text-xs">NO IMAGE</div>`}
                 </div>
-
-                <!-- Content Area -->
                 <div class="p-4 flex-1 flex flex-col cursor-pointer" onclick="showDetails('${record.id}')">
                     <h3 class="font-bold text-sm mb-1 line-clamp-2 min-h-[2.5rem] ${isCompleted ? 'line-through text-slate-400' : ''}">${record.title}</h3>
                     <div class="text-accent font-black text-lg ${isCompleted ? 'line-through opacity-50' : ''}">${priceText}</div>
                 </div>
-
-                <!-- Footer -->
                 <div class="p-4 pt-0 flex items-center justify-between">
                     <div class="flex items-center gap-2">
-                        <div class="w-6 h-6 bg-slate-100 rounded-full flex items-center justify-center">
-                            <i data-lucide="user" class="w-3.5 h-3.5 text-slate-400"></i>
-                        </div>
+                        <div class="w-6 h-6 bg-slate-100 rounded-full flex items-center justify-center"><i data-lucide="user" class="w-3.5 h-3.5 text-slate-400"></i></div>
                         <span class="text-[11px] font-bold text-slate-400 truncate max-w-[80px]">${record.ownerName || record.contactInfo}</span>
                     </div>
                     <div class="flex items-center gap-2 text-slate-400">
-                        <div class="flex items-center gap-1">
-                            <i data-lucide="message-square" class="w-3.5 h-3.5"></i>
-                            <span class="text-[11px] font-bold">${record.comment.length}</span>
-                        </div>
+                        <div class="flex items-center gap-1"><i data-lucide="message-square" class="w-3.5 h-3.5"></i><span class="text-[11px] font-bold">${record.comment.length}</span></div>
                     </div>
-                </div>
-            `;
+                </div>`;
             return div;
         }
 
-        function isOwnerOfSession(record) {
-            if (!currentUser) return false;
-            return record.ownerId === currentUser.id;
-        }
+        function isOwnerOfSession(record) { return currentUser && record.ownerId === currentUser.id; }
 
         function updateFiltersUI() {
             const localRecords = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || "[]");
-            
             const catContainer = document.getElementById('categoryFilterContainer');
             catContainer.innerHTML = '<span class="text-[13px] font-bold text-slate-500 mr-2 shrink-0">類別篩選：</span>';
-            
             ['全部', ...CATEGORIES].forEach(cat => {
                 const count = cat === '全部' ? localRecords.length : localRecords.filter(r => r.category === cat).length;
                 const btn = document.createElement('button');
                 btn.onclick = async () => { currentFilter.category = cat; await renderList(); };
                 btn.className = `px-4 py-1.5 rounded-full text-[13px] transition-all flex items-center gap-2 shrink-0 ${currentFilter.category === cat ? 'bg-primary text-white shadow-lg shadow-primary/20' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`;
-                btn.innerHTML = `
-                    <span>${cat}</span>
-                    <span class="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold ${currentFilter.category === cat ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-400'}">${count}</span>
-                `;
+                btn.innerHTML = `<span>${cat}</span><span class="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold ${currentFilter.category === cat ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-400'}">${count}</span>`;
                 catContainer.appendChild(btn);
             });
 
             const statusContainer = document.getElementById('statusFilterContainer');
             statusContainer.innerHTML = '<span class="text-[13px] font-bold text-slate-500 mr-2 shrink-0">狀態篩選：</span>';
-            
             STATUSES.forEach(status => {
                 const count = status.id === 'all' ? localRecords.length : localRecords.filter(r => r.status === status.id).length;
                 const btn = document.createElement('button');
                 btn.onclick = async () => { currentFilter.status = status.id; await renderList(); };
                 btn.className = `px-4 py-1.5 rounded-full text-[13px] transition-all flex items-center gap-2 shrink-0 ${currentFilter.status === status.id ? 'bg-accent text-white shadow-lg shadow-accent/20' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`;
-                btn.innerHTML = `
-                    <span>${status.name}</span>
-                    <span class="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold ${currentFilter.status === status.id ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-400'}">${count}</span>
-                `;
+                btn.innerHTML = `<span>${status.name}</span><span class="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold ${currentFilter.status === status.id ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-400'}">${count}</span>`;
                 statusContainer.appendChild(btn);
             });
         }
 
-        // --- ACTIONS ---
-        function openModal() {
-            document.getElementById('formModal').classList.remove('hidden');
-        }
-
+        function openModal() { document.getElementById('formModal').classList.remove('hidden'); }
         function closeModal() {
             document.getElementById('formModal').classList.add('hidden');
             document.getElementById('postForm').reset();
@@ -511,28 +433,21 @@
             if (file) {
                 const reader = new FileReader();
                 reader.onload = function(e) {
-                    const preview = document.getElementById('imageFilePreview');
-                    const placeholder = document.getElementById('uploadPlaceholder');
-                    const removeBtn = document.getElementById('removeImageBtn');
-                    preview.src = e.target.result;
-                    preview.classList.remove('hidden');
-                    placeholder.classList.add('hidden');
-                    removeBtn.classList.remove('hidden');
+                    document.getElementById('imageFilePreview').src = e.target.result;
+                    document.getElementById('imageFilePreview').classList.remove('hidden');
+                    document.getElementById('uploadPlaceholder').classList.add('hidden');
+                    document.getElementById('removeImageBtn').classList.remove('hidden');
                 };
                 reader.readAsDataURL(file);
             }
         }
 
         function removeSelectedImage() {
-            const input = document.getElementById('imageFile');
-            const preview = document.getElementById('imageFilePreview');
-            const placeholder = document.getElementById('uploadPlaceholder');
-            const removeBtn = document.getElementById('removeImageBtn');
-            input.value = "";
-            preview.src = "";
-            preview.classList.add('hidden');
-            placeholder.classList.remove('hidden');
-            removeBtn.classList.add('hidden');
+            document.getElementById('imageFile').value = "";
+            document.getElementById('imageFilePreview').src = "";
+            document.getElementById('imageFilePreview').classList.add('hidden');
+            document.getElementById('uploadPlaceholder').classList.remove('hidden');
+            document.getElementById('removeImageBtn').classList.add('hidden');
         }
 
         function fileToBase64(file) {
@@ -546,19 +461,9 @@
 
         document.getElementById('postForm').onsubmit = async function(e) {
             e.preventDefault();
-            
-            if (!currentUser) {
-                alert("請先登入帳號再發佈貼文");
-                showLoginModal();
-                return;
-            }
-
+            if (!currentUser) { alert("請先登入帳號再發佈貼文"); showLoginModal(); return; }
             const imageFile = document.getElementById('imageFile').files[0];
-            let imageBase64 = null;
-            
-            if (imageFile) {
-                imageBase64 = await fileToBase64(imageFile);
-            }
+            let imageBase64 = imageFile ? await fileToBase64(imageFile) : null;
             
             const newRecord = {
                 id: Date.now() + "_" + Math.random().toString(36).slice(2,6),
@@ -575,25 +480,37 @@
                 contactInfo: document.getElementById('contactInfo').value,
                 status: "active"
             };
-
             await saveData(newRecord);
             closeModal();
         };
 
         async function saveData(newRecord) {
-            const records = await loadData();
+            const records = await loadData(true); 
             const normalized = normalizeRecord(newRecord);
             records.unshift(normalized);
             localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
             await renderList(records);
             
-            const uploadRecord = { ...normalized, comment: JSON.stringify(normalized.comment) };
-            syncToSheet({ action: "create", record: uploadRecord });
+            const commentStr = JSON.stringify(normalized.comment);
+            // 【關鍵修復】：窮舉所有可能的欄位名稱，並同時放在根目錄與 record 物件中
+            const uploadData = {
+                ...normalized,
+                comment: commentStr,
+                Comment: commentStr,
+                comments: commentStr,
+                Comments: commentStr
+            };
+            
+            syncToSheet({ 
+                action: "create", 
+                record: uploadData,
+                ...uploadData // 兼容直接讀取根屬性的 GAS 代碼
+            });
         }
 
         async function deleteRecord(id) {
             if (!confirm("確定要刪除嗎？")) return;
-            let records = await loadData();
+            let records = await loadData(true);
             records = records.filter(r => r.id !== id);
             localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
             await renderList(records);
@@ -606,12 +523,9 @@
             if (!record) return;
 
             const modal = document.getElementById('detailsModal');
-            const imgContainer = document.getElementById('detailImageContainer');
-            const contentContainer = document.getElementById('detailContent');
-
-            imgContainer.innerHTML = record.image ? `<img src="${record.image}" class="w-full h-full object-contain p-4" />` : `<div class="text-slate-300">無圖片</div>`;
+            document.getElementById('detailImageContainer').innerHTML = record.image ? `<img src="${record.image}" class="w-full h-full object-contain p-4" />` : `<div class="text-slate-300">無圖片</div>`;
             
-            contentContainer.innerHTML = `
+            document.getElementById('detailContent').innerHTML = `
                 <div class="flex items-center justify-between mb-4">
                      <div class="flex gap-2">
                         <span class="px-3 py-1 rounded bg-primary text-white text-[10px] font-black">${record.type === 'sell' ? '出物' : '收物'}</span>
@@ -619,37 +533,30 @@
                      </div>
                      <button onclick="hideDetails()" class="text-slate-300 hover:text-slate-600"><i data-lucide="x"></i></button>
                 </div>
-                
                 <h2 class="text-2xl font-black text-slate-900 mb-2 ${record.status === 'completed' ? 'line-through' : ''}">${record.title}</h2>
                 <div class="text-3xl font-black text-accent mb-6 ${record.status === 'completed' ? 'line-through opacity-50' : ''}">${record.price == 0 ? '免費' : `$${record.price}`}</div>
-
                 <div class="bg-slate-50 p-5 rounded-2xl border border-slate-100 mb-6 flex-1 overflow-y-auto">
                     <h4 class="text-xs font-black text-slate-400 uppercase mb-3 tracking-widest">物品描述</h4>
                     <p class="text-sm text-slate-600 whitespace-pre-wrap leading-relaxed">${record.description || '無描述'}</p>
                 </div>
-
                 <div class="space-y-4 mb-6">
                     <div class="flex items-center gap-3">
                         <div class="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-400"><i data-lucide="user" class="w-4 h-4"></i></div>
                         <span class="text-sm font-bold text-slate-700">${record.contactInfo}</span>
                     </div>
                 </div>
-
                 ${isOwnerOfSession(record) ? `
                 <div class="grid grid-cols-3 gap-2 mb-6">
                     <button onclick="updateStatus('${record.id}', 'active')" class="text-[10px] font-bold py-2 rounded-lg ${record.status === 'active' ? 'bg-primary text-white' : 'bg-slate-100 hover:bg-slate-200'}">進行中</button>
                     <button onclick="updateStatus('${record.id}', 'reserved')" class="text-[10px] font-bold py-2 rounded-lg ${record.status === 'reserved' ? 'bg-accent text-white' : 'bg-accent/10 text-accent hover:bg-accent/20'}">已預訂</button>
                     <button onclick="updateStatus('${record.id}', 'completed')" class="text-[10px] font-bold py-2 rounded-lg ${record.status === 'completed' ? 'bg-slate-900 text-white shadow-lg' : 'bg-slate-100 font-bold'}">已售出</button>
-                </div>
-                ` : `
+                </div>` : `
                 <div class="mb-6 p-3 bg-slate-50 rounded-xl flex items-center justify-between">
                     <span class="text-xs font-bold text-slate-400">當前狀態</span>
                     <span class="text-xs font-bold ${record.status === 'completed' ? 'text-slate-900' : (record.status === 'reserved' ? 'text-accent' : 'text-primary')} uppercase">
                         ${record.status === 'completed' ? '已售出' : (record.status === 'reserved' ? '已預訂' : '進行中')}
                     </span>
-                </div>
-                `}
-
+                </div>`}
                 <div class="border-t border-slate-100 pt-6">
                     <h4 class="text-sm font-black mb-4">留言 (${record.comment.length})</h4>
                     <div class="space-y-3 max-h-[300px] overflow-y-auto pr-2" id="commentList">
@@ -662,36 +569,46 @@
                                 <p class="text-slate-600">${c.text}</p>
                                 ${c.replyTo ? `<div class="mt-1 text-[10px] text-primary font-bold">回覆 @${c.replyTo}</div>` : ''}
                                 <button onclick="prepareReply('${record.id}', '${c.user || '匿名校友'}')" class="text-[10px] text-slate-300 group-hover/comment:text-primary mt-1 font-bold">回覆</button>
-                            </div>
-                        `).join('')}
+                            </div>`).join('')}
                     </div>
                     <div class="mt-4 flex gap-2">
                         <input type="text" id="commentInput" class="flex-1 bg-slate-50 border-none rounded-xl p-3 text-xs" placeholder="${currentUser ? '輸入留言...' : '請先登入以留言'}" ${currentUser ? '' : 'disabled'}>
                         <button onclick="addComment('${record.id}')" class="bg-primary text-white p-3 rounded-xl" ${currentUser ? '' : 'disabled'}><i data-lucide="send" class="w-4 h-4"></i></button>
                     </div>
-                </div>
-            `;
-
+                </div>`;
             modal.classList.remove('hidden');
             lucide.createIcons();
         }
 
-        function hideDetails() {
-            document.getElementById('detailsModal').classList.add('hidden');
-        }
+        function hideDetails() { document.getElementById('detailsModal').classList.add('hidden'); }
 
         async function updateStatus(id, newStatus) {
-            // 直接從 localStorage 取得最新資料
             let records = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || "[]");
             const index = records.findIndex(r => r.id === id);
             if (index !== -1) {
                 records[index].status = newStatus;
                 localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(records));
                 await renderList(records);
-                await showDetails(id, true);  // 使用本地資料顯示詳情
+                await showDetails(id, true);  
                 
-                const recordToUpload = { ...records[index], comment: JSON.stringify(records[index].comment) };
-                syncToSheet({ action: "update", id: id, record: recordToUpload });
+                const commentStr = JSON.stringify(records[index].comment);
+                const uploadData = {
+                    ...records[index],
+                    status: newStatus,
+                    Status: newStatus,
+                    comment: commentStr,
+                    Comment: commentStr
+                };
+                
+                syncToSheet({ 
+                    action: "update", 
+                    id: id, 
+                    record: uploadData,
+                    status: newStatus,
+                    Status: newStatus,
+                    comment: commentStr,
+                    Comment: commentStr
+                });
             }
         }
 
@@ -709,7 +626,6 @@
             const text = input.value.trim();
             if (!text) return;
 
-            // 直接從 localStorage 取得最新資料，避免被遠端舊資料覆蓋
             let records = JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY) || "[]");
             const idx = records.findIndex(r => r.id === id);
             if (idx !== -1) {
@@ -723,88 +639,59 @@
                 input.value = '';
                 currentReplyTo = null;
                 
-                // 使用本地資料更新卡片列表與詳情
                 await renderList(records);
                 await showDetails(id, true);
                 
-                // 背景同步到 Sheet
-                const recordToUpload = { ...records[idx], comment: JSON.stringify(records[idx].comment) };
-                syncToSheet({ action: "update", id: id, record: recordToUpload });
+                // 【關鍵修復】：窮舉所有可能的欄位名稱與層級，確保 GAS 無論如何都能接收到
+                const commentStr = JSON.stringify(records[idx].comment);
+                const uploadData = {
+                    ...records[idx],
+                    comment: commentStr,
+                    Comment: commentStr,
+                    comments: commentStr,
+                    Comments: commentStr
+                };
+                
+                syncToSheet({ 
+                    action: "update", 
+                    id: id, 
+                    record: uploadData,
+                    comment: commentStr,
+                    Comment: commentStr
+                });
             }
         }
 
-        // ========== AI 功能（終極診斷版） ==========
         async function askAI(userPrompt) {
             try {
                 const res = await fetch(APPS_SCRIPT_URL, {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    headers: { "Content-Type": "text/plain;charset=utf-8" },
                     body: JSON.stringify({ action: "askAI", prompt: userPrompt })
                 });
-                
-                // 強制讀取回應文字，無論是否為 JSON
                 const rawText = await res.text();
-                console.log("AI 原始回應:", rawText);
-                
-                if (!res.ok) {
-                    throw new Error(`HTTP ${res.status}: ${rawText}`);
-                }
-                
-                // 嘗試解析 JSON
+                if (!res.ok) throw new Error(`HTTP ${res.status}: ${rawText}`);
                 let data;
-                try {
-                    data = JSON.parse(rawText);
-                } catch (parseErr) {
-                    return `❌ 後端回傳了非 JSON 格式的內容：\n${rawText.substring(0, 200)}`;
-                }
-                
-                // 顯示後端給的 error 或 result
-                if (data.error) {
-                    return `❌ ${data.error}`;
-                }
-                return data.result || "AI 沒有回覆內容 (result 欄位為空)";
-            } catch (e) {
-                console.error("askAI 請求失敗", e);
-                return `❌ 無法連線到 AI 服務\n${e.message}`;
-            }
+                try { data = JSON.parse(rawText); } catch (e) { return `❌ 後端回傳非 JSON：\n${rawText.substring(0, 200)}`; }
+                if (data.error) return `❌ ${data.error}`;
+                return data.result || "AI 沒有回覆內容";
+            } catch (e) { return `❌ 無法連線到 AI 服務\n${e.message}`; }
         }
 
         async function handleAISummary() {
             const btn = document.getElementById('aiBtn');
             const text = document.getElementById('aiBtnText');
-            btn.disabled = true;
-            text.textContent = '分析中...';
+            btn.disabled = true; text.textContent = '分析中...';
             try {
                 const records = await loadData();
-                if (records.length === 0) {
-                    alert('目前平台沒有商品資料可供分析');
-                    return;
-                }
-                
-                const summaryInput = records.slice(0, 30).map(r =>
-                    `[${r.type === 'sell' ? '出物' : '收物'}/${r.category}] ${r.title} - MOP ${r.price} (狀態: ${r.status})`
-                ).join('\n');
-                
-                const prompt = '以下是校園二手市集平台的最新物品清單。請使用繁體中文，用 3-5 句概括同學們目前最主要的物資需求（哪些東西最熱門）、價格分佈狀況，以及交易市場的活躍趨勢或明顯 pattern:\n\n' + summaryInput;
-                
-                const result = await askAI(prompt);
-                
-                // 將完整結果顯示給使用者，不做過濾
-                alert(result);
-                
-                // 若結果明顯為錯誤，額外在控制台提示可能的修復方向
-                if (result.includes("AI 暫時冇回應") || result.includes("缺少 API Key")) {
-                    console.warn("🔧 請檢查 Google Apps Script 後端：\n1. 指令碼屬性中的 GEMINI_API_KEY 是否正確\n2. _askAI 函式中的模型名稱是否為有效模型 (例如 gemini-1.5-flash)\n3. 重新部署為新版本後再試");
-                }
-            } catch (e) {
-                alert('AI 分析出錯：' + e.message);
-            } finally {
-                btn.disabled = false;
-                text.textContent = 'AI 盤點';
-            }
+                if (records.length === 0) { alert('目前沒有商品資料'); return; }
+                const summaryInput = records.slice(0, 30).map(r => `[${r.type === 'sell' ? '出物' : '收物'}/${r.category}] ${r.title} - MOP ${r.price} (狀態: ${r.status})`).join('\n');
+                const prompt = '以下是校園二手市集平台的最新物品清單。請使用繁體中文，用 3-5 句概括同學們目前最主要的物資需求、價格分佈狀況，以及交易市場的活躍趨勢:\n\n' + summaryInput;
+                alert(await askAI(prompt));
+            } catch (e) { alert('AI 分析出錯：' + e.message); } 
+            finally { btn.disabled = false; text.textContent = 'AI 盤點'; }
         }
 
-        // --- INIT ---
         window.onload = async function() {
             loadUser();
             await renderList();
